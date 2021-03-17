@@ -1,0 +1,8 @@
+
+
+**/.vscode
+*.pdf
+*.log
+*.bin
+*.asc
+*.code-workspace
