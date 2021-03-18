@@ -1,4 +1,4 @@
-from machine import Pin
+from machine import Pin, ADC
 import micropython
 import time
 import utime
@@ -143,22 +143,26 @@ def update_leds(percent):
 
     if percent > 100:
         percent = 100
+    elif percent < 1:
+        percent = 0
 
-    num_leds = int(percent*24.0/100.0)
+    num_leds = round(percent*24.0/100.0)
     
+    # print("num leds {}".format(num_leds))
     leds = LED_LIST
     
     # update low LED Bank
-    if num_leds >= 8:
-        on(leds + [LOW_LED_PWR])
-    else:
-        # Leds are in opposite order for the first bank
-        on(leds[-num_leds:] + [LOW_LED_PWR])
+    if num_leds > 0:
+        if num_leds >= 8:
+            on(leds + [LOW_LED_PWR])
+        else:
+            # Leds are in opposite order for the first bank
+            on(leds[-num_leds:] + [LOW_LED_PWR])
 
-    time.sleep(SLEEP_TIME_S)
+        time.sleep(SLEEP_TIME_S)
 
-    # Turn off the LEDS and their power
-    off(leds + [LOW_LED_PWR])
+        # Turn off the LEDS and their power
+        off(leds + [LOW_LED_PWR])
 
 
     # Update med LED bank
@@ -176,6 +180,9 @@ def update_leds(percent):
 
     # update High LED Bank
     num_high_leds = num_leds - 16
+
+    # The board is wired wrong for the last bank, so we need to swap two pins
+    leds = leds[:-3] +[leds[-2], leds[-3], leds[-1]]
     if num_high_leds > 0:
         if num_high_leds >= 8:
             on(leds + [HIGH_LED_PWR])
@@ -254,6 +261,8 @@ def calculate_rpm(Pin):
 
 # Initialize the pins and buffers that will be used
 init_DRO_pins()
+adc = ADC(Pin(36))
+adc.atten(ADC.ATTN_11DB)
 
 # Set the hall effect pin as an input
 he_pin = Pin(HALL_EFFECT, Pin.IN)
@@ -275,7 +284,8 @@ while True:
         update_leds(led_val)
         update_display(rpm_num)
 
-        led_val = (rpm_num/150)*100.0
+        led_val = (adc.read()/3600.)*100.0
+        
 
 
     
