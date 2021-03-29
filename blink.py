@@ -12,17 +12,17 @@ GEAR_RATIO = 4.
 LED_LIST = [12, 25, 15, 26, 14, 27, 0, 4] # RPi GPIO Pins that the LEDS are connected to
 
 # Defines the pins needed to create the specified number on the 7 segement display
-SEVEN_SEG_DICT = {0 : [15, 27, 4, 26, 12, 25],
-                  1:  [12, 26]  ,
-                  2 : [25, 12, 14, 27, 4], 
-                  3 : [25, 12, 14, 26, 4],
-                  4 : [12, 14, 26, 15],
-                  5 : [12, 15, 14, 26, 4],
-                  6 : [12, 15, 14, 26, 4, 27],
-                  7 : [25, 12, 26],
-                  8 : [14, 15, 27, 4, 26, 12, 25],
-                  9 : [14, 15, 26, 12, 25],
-                  "dp" : [0],
+SEVEN_SEG_DICT = {0 : [12, 14, 25, 27, 15, 0],
+                  1:  [14, 25]  ,
+                  2 : [12, 14, 26, 15, 27], 
+                  3 : [12, 14, 26, 25, 27],
+                  4 : [14, 25, 26, 0],
+                  5 : [12, 0, 26, 25, 27],
+                  6 : [12, 0, 26, 25, 27, 15],
+                  7 : [14, 25, 12],
+                  8 : [14, 15, 27, 0, 26, 12, 25],
+                  9 : [14, 27, 0, 26, 12, 25],
+                  "dp" : [4],
                   "All" : [14, 15, 27, 4, 26, 12, 25, 0]}
 
 # Power-bus power pins
@@ -40,6 +40,15 @@ DIGIT_PWR_LIST = [DIGIT_1, DIGIT_2, DIGIT_3]
 # GPIO pin the Hall effect is read from
 HALL_EFFECT = 35
 
+## GPIO pin the TPS is read from
+TPS = 34
+TPS_MIN = 300
+TPS_MAX = 3300
+
+# Power control pin: Controls flow of power to the 3.3v Rail supplying the LEDS and 7 segements
+# This is needed to reserve power for ESP32 startup sequence. Without it, the board gets stuck in a boot cycle
+POWER_CONTROL = 23
+
 # How long to leave the LEDS on for (trades brightness for execution time)
 SLEEP_TIME_S = 0.001
 
@@ -50,6 +59,11 @@ GPIO_OUT_W1TC_REG = const(0x3FF4400C)
 GPIO_IN1_REG = const(0x3FF44040 )
 GPIO_OUT1_W1TS_REG = const(0x3FF44014)
 GPIO_OUT1_W1TC_REG = const(0x3FF44018)
+
+
+## Global veriables
+hall_effect_buffer = [0.,]*10
+rpm = 0 
 
 # Read the GPIO state of a specified pin number
 @micropython.viper
@@ -131,7 +145,11 @@ def timed_function(f, *args, **kwargs):
 # Iniailize DRO pins and set all GPIO pins high (no paths to ground) and 
 def init_DRO_pins():
     [Pin(pin, Pin.OUT) for pin in LED_LIST + LED_PWR_LIST + DIGIT_PWR_LIST]
-    turn_pinlist_on(LED_LIST + LED_PWR_LIST + DIGIT_PWR_LIST)
+    turn_pinlist_on(LED_LIST + LED_PWR_LIST + DIGIT_PWR_LIST )
+
+    # Power LEDS and 7 segement display
+    pwr_pin = Pin(POWER_CONTROL, Pin.OUT)
+    pwr_pin.value(0)
 
 # Provided a percent, determine the number of LEDS to illuminate
 # @timed_function
@@ -182,16 +200,20 @@ def update_leds(percent):
     num_high_leds = num_leds - 16
 
     # The board is wired wrong for the last bank, so we need to swap two pins
-    leds = leds[:-3] +[leds[-2], leds[-3], leds[-1]]
+    # leds = leds[:-3] +[leds[-2], leds[-3], leds[-1]]
     if num_high_leds > 0:
         if num_high_leds >= 8:
             on(leds + [HIGH_LED_PWR])
         else:
-            on(leds[0:num_high_leds] + [HIGH_LED_PWR])
+            # on(leds[0:num_high_leds] + [HIGH_LED_PWR])
+            # Leds are in opposite order for the first bank
+            on(leds[-num_high_leds:] + [HIGH_LED_PWR])
 
         time.sleep(SLEEP_TIME_S)
         # Turn off the LEDS
         off(leds + [HIGH_LED_PWR])
+    
+    print("Effort Percent: ", percent)
 
 # Given an integer, update the 7 segment displays to display the  number
 # @timed_function
@@ -233,7 +255,7 @@ def round_to_nearest(x, base=5):
 # @timed_function
 def calculate_rpm(Pin):
     global hall_effect_buffer
-    global rpm_num
+    global rpm
 
     # record the time
     hall_effect_buffer.append(utime.ticks_ms())
@@ -250,42 +272,59 @@ def calculate_rpm(Pin):
     
     # from the avg_diff, calculate the RPM and deal with the divide by zero error that could arise
     if avg_diff == 0:
-        rpm_num = 0
+        rpm = 0
     else:
         # RPMS will be rather inconsistant, so instead, round the results to 0 or 5
-        rpm_num = round_to_nearest(60./(avg_diff*GEAR_RATIO), 5)
+        rpm = round_to_nearest(60./(avg_diff*GEAR_RATIO), 2)
 
     # Print and return the results
-    print("rpm: ", rpm_num)         
+    print("Current RPM: ", rpm)         
 
 
-# Initialize the pins and buffers that will be used
-init_DRO_pins()
-adc = ADC(Pin(36))
-adc.atten(ADC.ATTN_11DB)
+def main():
+    # Initialize the pins and buffers that will be used
+    init_DRO_pins()
+    tps = ADC(Pin(TPS))
+    tps.atten(ADC.ATTN_11DB)
 
-# Set the hall effect pin as an input
-he_pin = Pin(HALL_EFFECT, Pin.IN)
+    # Set the hall effect pin as an input
+    he_pin = Pin(HALL_EFFECT, Pin.IN)
 
-# Initialize the needed variables
-hall_effect_buffer = [0.,]*10
-rpm_num = 0
-led_val = 0
-last_update_time = 0
+    # Initialize the needed variables
+    rpm = 0
+    led_val = 0
+    last_update_time = 0
 
-# Initilize the interrupt service routine
-he_pin.irq(handler=calculate_rpm, trigger=Pin.IRQ_FALLING)
+    # Initilize the interrupt service routine
+    he_pin.irq(handler=calculate_rpm, trigger=Pin.IRQ_FALLING)
 
-# Run the update loop indefinitely 
-while True: 
-    now = utime.ticks_us()
-    if now - last_update_time > 8000: # update at 120hz
-        last_update_time = now
-        update_leds(led_val)
-        update_display(rpm_num)
+    # Run the update loop indefinitely 
+    while True: 
+        now = utime.ticks_us()
+        if now - last_update_time > 8000: # update at 120hz (time us)
+        # if now - last_update_time > 0.25e6: # update at 120hz (time us)
 
-        led_val = (adc.read()/3600.)*100.0
-        
+            tps_val = tps.read()
+            led_val = ((tps_val-TPS_MIN)/(TPS_MAX-TPS_MIN))*100.0
+            # print("raw TPS val: ", tps_val)
+
+
+            update_leds(led_val)
+            update_display(rpm)
+
+            # rpm_num += 1
+            # led_val += (100/24.)/2
+            # if led_val > 100:
+            #     led_val = 0
+            # if rpm_num > 999:
+            #     rpm_num = 0
+
+            last_update_time = now
+
+
+
+if __name__ == "__main__":
+    main()
 
 
     

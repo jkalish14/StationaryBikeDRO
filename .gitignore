@@ -6,3 +6,16 @@
 *.bin
 *.asc
 *.code-workspace
+*.mp4
+*.stl
+*.3mf
+*.gcode
+
+**/CAD/~*
+
+**/PCB_Design
+pymakr.conf
+
+# Sensitive files (contains passwords or other information)
+passwords.py
+webrepl_cfg.py
