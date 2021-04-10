@@ -2,6 +2,9 @@ from machine import Pin, ADC
 import micropython
 import time
 import utime
+import bluetooth
+
+from bluetooth_gatt import BLEGattServer
 
 micropython.alloc_emergency_exception_buf(100)
 
@@ -9,32 +12,32 @@ micropython.alloc_emergency_exception_buf(100)
 GEAR_RATIO = 4.
 
 # LED / 7 Segement paths to ground
-LED_LIST = [12, 25, 15, 26, 14, 27, 0, 4] # RPi GPIO Pins that the LEDS are connected to
+LED_LIST = [13, 16, 12, 17, 26, 25,  25, 33, 23] # RPi GPIO Pins that the LEDS are connected to
 
 # Defines the pins needed to create the specified number on the 7 segement display
-SEVEN_SEG_DICT = {0 : [12, 14, 25, 27, 15, 0],
-                  1:  [14, 25]  ,
-                  2 : [12, 14, 26, 15, 27], 
-                  3 : [12, 14, 26, 25, 27],
-                  4 : [14, 25, 26, 0],
-                  5 : [12, 0, 26, 25, 27],
-                  6 : [12, 0, 26, 25, 27, 15],
-                  7 : [14, 25, 12],
-                  8 : [14, 15, 27, 0, 26, 12, 25],
-                  9 : [14, 27, 0, 26, 12, 25],
-                  "dp" : [4],
-                  "All" : [14, 15, 27, 4, 26, 12, 25, 0]}
+SEVEN_SEG_DICT = {0 : [13, 26, 16, 25, 12, 33],
+                  1:  [26, 16]  ,
+                  2 : [13, 26, 17, 12, 25], 
+                  3 : [13, 26, 17, 16, 25],
+                  4 : [26, 16, 17, 33],
+                  5 : [13, 33, 17, 16, 25],
+                  6 : [13, 33, 17, 16, 25, 12],
+                  7 : [26, 16, 13],
+                  8 : [26, 12, 25, 33, 17, 13, 16],
+                  9 : [26, 25, 33, 17, 13, 16],
+                  "dp" : [23],
+                  "All" : [13, 16, 12, 17, 26, 25, 33, 25, 23]}
 
 # Power-bus power pins
-HIGH_LED_PWR = const(13)
-MED_LED_PWR =  const(32)
-LOW_LED_PWR =  const(33)
+HIGH_LED_PWR = const(5)
+MED_LED_PWR =  const(4)
+LOW_LED_PWR =  const(14)
 LED_PWR_LIST = [HIGH_LED_PWR, MED_LED_PWR, LOW_LED_PWR]
 
 # 7 Segement display power pins
-DIGIT_1 = const(17)
-DIGIT_2 = const(16)
-DIGIT_3 = const(2)
+DIGIT_1 = const(2)
+DIGIT_2 = const(15)
+DIGIT_3 = const(27)
 DIGIT_PWR_LIST = [DIGIT_1, DIGIT_2, DIGIT_3]
 
 # GPIO pin the Hall effect is read from
@@ -47,7 +50,7 @@ TPS_MAX = 3300
 
 # Power control pin: Controls flow of power to the 3.3v Rail supplying the LEDS and 7 segements
 # This is needed to reserve power for ESP32 startup sequence. Without it, the board gets stuck in a boot cycle
-POWER_CONTROL = 23
+POWER_CONTROL = 32
 
 # How long to leave the LEDS on for (trades brightness for execution time)
 SLEEP_TIME_S = 0.001
@@ -64,6 +67,11 @@ GPIO_OUT1_W1TC_REG = const(0x3FF44018)
 ## Global veriables
 hall_effect_buffer = [0.,]*10
 rpm = 0 
+
+## Bluetooth variables needed
+cumulitive_crank_cycles = 0
+cumulitive_wheel_cycles = 0
+last_crank_update = 0
 
 # Read the GPIO state of a specified pin number
 @micropython.viper
@@ -173,9 +181,11 @@ def update_leds(percent):
     if num_leds > 0:
         if num_leds >= 8:
             on(leds + [LOW_LED_PWR])
+            print("Tunred on light 8")
         else:
             # Leds are in opposite order for the first bank
             on(leds[-num_leds:] + [LOW_LED_PWR])
+            print("Tunred on light {0}".format(num_leds))
 
         time.sleep(SLEEP_TIME_S)
 
@@ -198,22 +208,19 @@ def update_leds(percent):
 
     # update High LED Bank
     num_high_leds = num_leds - 16
-
-    # The board is wired wrong for the last bank, so we need to swap two pins
-    # leds = leds[:-3] +[leds[-2], leds[-3], leds[-1]]
     if num_high_leds > 0:
         if num_high_leds >= 8:
             on(leds + [HIGH_LED_PWR])
         else:
-            # on(leds[0:num_high_leds] + [HIGH_LED_PWR])
-            # Leds are in opposite order for the first bank
+
+            # Leds are in opposite order than listed
             on(leds[-num_high_leds:] + [HIGH_LED_PWR])
 
         time.sleep(SLEEP_TIME_S)
         # Turn off the LEDS
         off(leds + [HIGH_LED_PWR])
     
-    print("Effort Percent: ", percent)
+    # print("Effort Percent: ", percent)
 
 # Given an integer, update the 7 segment displays to display the  number
 # @timed_function
@@ -256,6 +263,15 @@ def round_to_nearest(x, base=5):
 def calculate_rpm(Pin):
     global hall_effect_buffer
     global rpm
+    global cumulitive_crank_cycles, cumulitive_wheel_cycles
+    global last_crank_update
+
+    # # Update the values needed for bluetooth
+    cumulitive_wheel_cycles += 1
+
+    if cumulitive_wheel_cycles % GEAR_RATIO == 0:
+        cumulitive_crank_cycles += 1
+        last_crank_update = int(1024*utime.ticks_us()/(1e6))
 
     # record the time
     hall_effect_buffer.append(utime.ticks_ms())
@@ -278,20 +294,27 @@ def calculate_rpm(Pin):
         rpm = round_to_nearest(60./(avg_diff*GEAR_RATIO), 2)
 
     # Print and return the results
-    print("Current RPM: ", rpm)         
+    # print("Current RPM: ", rpm)     /    
 
 
 def main():
-    # Initialize the pins and buffers that will be used
+
+    global cumulitive_crank_cycles
+    global last_crank_update
+    global rpm
+
+    # Initialize the pin we will need
     init_DRO_pins()
     tps = ADC(Pin(TPS))
     tps.atten(ADC.ATTN_11DB)
-
-    # Set the hall effect pin as an input
     he_pin = Pin(HALL_EFFECT, Pin.IN)
 
+    # # Initialize the bluetooth 
+    ble = bluetooth.BLE()
+    ble_server = BLEGattServer(ble)
+    last_ble_msg_time = 0
+
     # Initialize the needed variables
-    rpm = 0
     led_val = 0
     last_update_time = 0
 
@@ -301,8 +324,15 @@ def main():
     # Run the update loop indefinitely 
     while True: 
         now = utime.ticks_us()
+
+        
+        # update_leds(led_val)
+        # update_display(rpm)
+
         if now - last_update_time > 8000: # update at 120hz (time us)
-        # if now - last_update_time > 0.25e6: # update at 120hz (time us)
+        # if now - last_update_time > 1e6: 
+            last_update_time = now
+
 
             tps_val = tps.read()
             led_val = ((tps_val-TPS_MIN)/(TPS_MAX-TPS_MIN))*100.0
@@ -311,16 +341,30 @@ def main():
 
             update_leds(led_val)
             update_display(rpm)
-
-            # rpm_num += 1
-            # led_val += (100/24.)/2
+            # rpm += 1
+            # led_val += (100/24.)
             # if led_val > 100:
             #     led_val = 0
-            # if rpm_num > 999:
-            #     rpm_num = 0
+            # if rpm > 999:
+            #     rpm = 0
 
-            last_update_time = now
 
+        if ble_server.is_connected():
+            now = utime.ticks_us()
+            if now - last_ble_msg_time > 1e6:
+
+                # cumulitive_crank_cycles += 1
+                # last_crank_update = int(1024*utime.ticks_us()/(1e6))
+
+                contains_data = "{0:08b}".format(2)
+                cum_crank_revolutions = "{0:016b}".format(cumulitive_crank_cycles)
+                last_event_time = "{0:016b}".format(last_crank_update)
+                package = int(last_event_time + cum_crank_revolutions + contains_data,2).to_bytes(5, 'little')
+                # package = int("{0:08b} + {1:016b} + {2:016b}".format(2, cumulitive_crank_cycles, last_crank_update)).to_bytes(5, "big")
+                print("sending: ", package)
+
+                ble_server.send(package)
+                last_ble_msg_time = now
 
 
 if __name__ == "__main__":
