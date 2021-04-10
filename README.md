@@ -6,4 +6,4 @@ Read the [blog post](jkalish.com/blog/stationary-bike-dro)
 
 <!-- ![Finished Project](/images/Finished_Project.JPEG) -->
 
-<img src="https://github.com/jkalish14/StationaryBikeDRO/tree/master/images/Finished_Project.JPEG" width="48">
+<img src="https://github.com/jkalish14/StationaryBikeDRO/blob/master/images/Finished_Project.JPEG" width="500">
